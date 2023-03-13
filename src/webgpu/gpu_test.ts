@@ -28,7 +28,6 @@ import { CommandBufferMaker, EncoderType } from './util/command_buffer_maker.js'
 import { ScalarType } from './util/conversion.js';
 import { DevicePool, DeviceProvider, UncanonicalizedDeviceDescriptor } from './util/device_pool.js';
 import { align, roundDown } from './util/math.js';
-import { createTextureFromTexelView, createTextureFromTexelViews } from './util/texture.js';
 import {
   getTextureCopyLayout,
   getTextureSubCopyLayout,
@@ -42,6 +41,7 @@ import {
   TexelCompareOptions,
   textureContentIsOKByT2B,
 } from './util/texture/texture_ok.js';
+import { createTextureFromTexelView, createTextureFromTexelViews } from './util/texture.js';
 import { reifyOrigin3D } from './util/unions.js';
 
 const devicePool = new DevicePool();
