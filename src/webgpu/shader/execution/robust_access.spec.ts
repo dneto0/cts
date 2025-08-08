@@ -7,10 +7,12 @@ TODO: add tests to check that textureLoad operations stay in-bounds.
 
 import { makeTestGroup } from '../../../common/framework/test_group.js';
 import { assert } from '../../../common/util/util.js';
-import { GPUTest } from '../../gpu_test.js';
+import { Float16Array } from '../../../external/petamoriken/float16/float16.js';
+import { AllFeaturesMaxLimitsGPUTest, GPUTest } from '../../gpu_test.js';
+import { align } from '../../util/math.js';
 import { generateTypes, supportedScalarTypes, supportsAtomics } from '../types.js';
 
-export const g = makeTestGroup(GPUTest);
+export const g = makeTestGroup(AllFeaturesMaxLimitsGPUTest);
 
 const kMaxU32 = 0xffff_ffff;
 const kMaxI32 = 0x7fff_ffff;
@@ -22,44 +24,48 @@ const kMinI32 = -0x8000_0000;
  * Non-test bindings are in bind group 1, including:
  * - `constants.zero`: a dynamically-uniform `0u` value.
  */
-function runShaderTest(
+async function runShaderTest(
   t: GPUTest,
+  enables: string,
   stage: GPUShaderStageFlags,
   testSource: string,
-  testBindings: GPUBindGroupEntry[]
-): void {
+  layout: GPUPipelineLayout,
+  testBindings: GPUBindGroupEntry[],
+  dynamicOffsets?: number[]
+): Promise<void> {
   assert(stage === GPUShaderStage.COMPUTE, 'Only know how to deal with compute for now');
 
   // Contains just zero (for now).
-  const constantsBuffer = t.device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM });
+  const constantsBuffer = t.createBufferTracked({ size: 4, usage: GPUBufferUsage.UNIFORM });
 
-  const resultBuffer = t.device.createBuffer({
+  const resultBuffer = t.createBufferTracked({
     size: 4,
     usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
   });
 
-  const source = `
-    [[block]] struct Constants {
-      zero: u32;
-    };
-    [[group(1), binding(0)]] var<uniform> constants: Constants;
+  const source = `${enables}
+struct Constants {
+  zero: u32
+};
+@group(1) @binding(0) var<uniform> constants: Constants;
 
-    [[block]] struct Result {
-      value: u32;
-    };
-    [[group(1), binding(1)]] var<storage, write> result: Result;
+struct Result {
+  value: u32
+};
+@group(1) @binding(1) var<storage, read_write> result: Result;
 
-    ${testSource}
+${testSource}
 
-    [[stage(compute), workgroup_size(1)]]
-    fn main() {
-      ignore(constants.zero); // Ensure constants buffer is statically-accessed
-      result.value = runTest();
-    }`;
+@compute @workgroup_size(1)
+fn main() {
+  _ = constants.zero; // Ensure constants buffer is statically-accessed
+  result.value = runTest();
+}`;
 
   t.debug(source);
   const module = t.device.createShaderModule({ code: source });
-  const pipeline = t.device.createComputePipeline({
+  const pipeline = await t.device.createComputePipelineAsync({
+    layout,
     compute: { module, entryPoint: 'main' },
   });
 
@@ -79,10 +85,10 @@ function runShaderTest(
   const encoder = t.device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
-  pass.setBindGroup(0, testGroup);
+  pass.setBindGroup(0, testGroup, dynamicOffsets);
   pass.setBindGroup(1, group);
-  pass.dispatch(1);
-  pass.endPass();
+  pass.dispatchWorkgroups(1);
+  pass.end();
 
   t.queue.submit([encoder.finish()]);
 
@@ -92,10 +98,12 @@ function runShaderTest(
 /** Fill an ArrayBuffer with sentinel values, except clear a region to zero. */
 function testFillArrayBuffer(
   array: ArrayBuffer,
-  type: 'u32' | 'i32' | 'f32',
+  type: 'u32' | 'i32' | 'f16' | 'f32',
   { zeroByteStart, zeroByteCount }: { zeroByteStart: number; zeroByteCount: number }
 ) {
-  const constructor = { u32: Uint32Array, i32: Int32Array, f32: Float32Array }[type];
+  const constructor = { u32: Uint32Array, i32: Int32Array, f16: Float16Array, f32: Float32Array }[
+    type
+  ];
   assert(zeroByteCount % constructor.BYTES_PER_ELEMENT === 0);
   new constructor(array).fill(42);
   new constructor(array, zeroByteStart, zeroByteCount / constructor.BYTES_PER_ELEMENT).fill(0);
@@ -118,35 +126,73 @@ g.test('linear_memory')
     TODO: Test types like vec2<atomic<i32>>, if that's allowed.
     TODO: Test exprIndexAddon as constexpr.
     TODO: Test exprIndexAddon as pipeline-overridable constant expression.
+    TODO: Adjust test logic to support array of f16 in the uniform address space
   `
   )
   .params(u =>
     u
       .combineWithParams([
-        { storageClass: 'storage', storageMode: 'read', access: 'read' },
-        { storageClass: 'storage', storageMode: 'write', access: 'write' },
-        { storageClass: 'storage', storageMode: 'read_write', access: 'read' },
-        { storageClass: 'storage', storageMode: 'read_write', access: 'write' },
-        { storageClass: 'uniform', access: 'read' },
-        { storageClass: 'private', access: 'read' },
-        { storageClass: 'private', access: 'write' },
-        { storageClass: 'function', access: 'read' },
-        { storageClass: 'function', access: 'write' },
-        { storageClass: 'workgroup', access: 'read' },
-        { storageClass: 'workgroup', access: 'write' },
+        { addressSpace: 'storage', storageMode: 'read', access: 'read', dynamicOffset: false },
+        {
+          addressSpace: 'storage',
+          storageMode: 'read_write',
+          access: 'read',
+          dynamicOffset: false,
+        },
+        {
+          addressSpace: 'storage',
+          storageMode: 'read_write',
+          access: 'write',
+          dynamicOffset: false,
+        },
+        { addressSpace: 'storage', storageMode: 'read', access: 'read', dynamicOffset: true },
+        { addressSpace: 'storage', storageMode: 'read_write', access: 'read', dynamicOffset: true },
+        {
+          addressSpace: 'storage',
+          storageMode: 'read_write',
+          access: 'write',
+          dynamicOffset: true,
+        },
+        { addressSpace: 'uniform', access: 'read', dynamicOffset: false },
+        { addressSpace: 'uniform', access: 'read', dynamicOffset: true },
+        { addressSpace: 'private', access: 'read' },
+        { addressSpace: 'private', access: 'write' },
+        { addressSpace: 'function', access: 'read' },
+        { addressSpace: 'function', access: 'write' },
+        { addressSpace: 'workgroup', access: 'read' },
+        { addressSpace: 'workgroup', access: 'write' },
       ] as const)
       .combineWithParams([
         { containerType: 'array' },
         { containerType: 'matrix' },
         { containerType: 'vector' },
       ] as const)
+      .combineWithParams([
+        { shadowingMode: 'none' },
+        { shadowingMode: 'module-scope' },
+        { shadowingMode: 'function-scope' },
+      ])
       .expand('isAtomic', p => (supportsAtomics(p) ? [false, true] : [false]))
-      .beginSubcases()
       .expand('baseType', supportedScalarTypes)
+      .beginSubcases()
       .expandWithParams(generateTypes)
   )
   .fn(async t => {
-    const { storageClass, storageMode, access, isAtomic, baseType, type, _kTypeInfo } = t.params;
+    const {
+      addressSpace,
+      storageMode,
+      access,
+      dynamicOffset,
+      isAtomic,
+      containerType,
+      baseType,
+      type,
+      shadowingMode,
+      _kTypeInfo,
+    } = t.params;
+    if (baseType === 'f16') {
+      t.skipIfDeviceDoesNotHaveFeature('shader-f16');
+    }
 
     assert(_kTypeInfo !== undefined, 'not an indexable type');
     assert('arrayLength' in _kTypeInfo);
@@ -162,25 +208,40 @@ g.test('linear_memory')
     // Declare the data that will be accessed to check robust access, as a buffer or a struct
     // in the global scope or inside the test function itself.
     const structDecl = `
-      struct S {
-        startCanary: array<u32, 10>;
-        data: ${type};
-        endCanary: array<u32, 10>;
-      };`;
+struct S {
+  startCanary: array<u32, 10>,
+  data: ${type},
+  endCanary: array<u32, 10>,
+};`;
 
-    switch (storageClass) {
+    const testGroupBGLEntires: GPUBindGroupLayoutEntry[] = [];
+    switch (addressSpace) {
       case 'uniform':
       case 'storage':
         {
           assert(_kTypeInfo.layout !== undefined);
           const layout = _kTypeInfo.layout;
-          bufferBindingSize = layout.size;
-          const qualifiers = storageClass === 'storage' ? `storage, ${storageMode}` : storageClass;
+          bufferBindingSize = align(layout.size, layout.alignment);
+          const qualifiers = addressSpace === 'storage' ? `storage, ${storageMode}` : addressSpace;
           globalSource += `
-          [[block]] struct TestData {
-            data: ${type};
-          };
-          [[group(0), binding(0)]] var<${qualifiers}> s: TestData;`;
+struct TestData {
+  data: ${type},
+};
+@group(0) @binding(0) var<${qualifiers}> s: TestData;`;
+
+          testGroupBGLEntires.push({
+            binding: 0,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: {
+              type:
+                addressSpace === 'uniform'
+                  ? 'uniform'
+                  : storageMode === 'read'
+                  ? 'read-only-storage'
+                  : 'storage',
+              hasDynamicOffset: dynamicOffset,
+            },
+          });
         }
         break;
 
@@ -188,7 +249,7 @@ g.test('linear_memory')
       case 'workgroup':
         usesCanary = true;
         globalSource += structDecl;
-        globalSource += `var<${storageClass}> s: S;`;
+        globalSource += `var<${addressSpace}> s: S;`;
         break;
 
       case 'function':
@@ -203,10 +264,10 @@ g.test('linear_memory')
     // If we use a local canary declared in the shader, initialize it.
     if (usesCanary) {
       testFunctionSource += `
-        for (var i = 0u; i < 10u; i = i + 1u) {
-          s.startCanary[i] = 0xFFFFFFFFu;
-          s.endCanary[i] = 0xFFFFFFFFu;
-        }`;
+  for (var i = 0u; i < 10u; i = i + 1u) {
+    s.startCanary[i] = 0xFFFFFFFFu;
+    s.endCanary[i] = 0xFFFFFFFFu;
+  }`;
     }
 
     /** Returns a different number each time, kind of like a `__LINE__` to ID the failing check. */
@@ -255,59 +316,130 @@ g.test('linear_memory')
       ]) {
         // Produce the accesses to the variable.
         for (const indexToTest of indicesToTest) {
-          const exprIndex = `(${indexToTest})${exprIndexAddon}`;
+          testFunctionSource += `
+  {
+    let index = (${indexToTest})${exprIndexAddon};`;
           const exprZeroElement = `${_kTypeInfo.elementBaseType}()`;
-          const exprElement = `s.data[${exprIndex}]`;
-
+          const exprElement = `s.data[index]`;
+          const suffices = _kTypeInfo.accessSuffixes ?? [''];
           switch (access) {
             case 'read':
               {
                 const exprLoadElement = isAtomic ? `atomicLoad(&${exprElement})` : exprElement;
-                let condition = `${exprLoadElement} != ${exprZeroElement}`;
-                if ('innerLength' in _kTypeInfo) condition = `any(${condition})`;
-                testFunctionSource += `
-                  if (${condition}) { return ${nextErrorReturnValue()}; }`;
+                let conditions = suffices.map(x => `${exprLoadElement}${x} != ${exprZeroElement}`);
+                if (containerType === 'matrix') {
+                  // The comparison is a vector bool result.
+                  // Convert that to a scalar bool.
+                  conditions = conditions.map(c => `any(${c})`);
+                }
+                conditions.forEach(c => {
+                  testFunctionSource += `
+    if (${c}) { return ${nextErrorReturnValue()}; }`;
+                });
               }
               break;
 
             case 'write':
               if (isAtomic) {
                 testFunctionSource += `
-                  atomicStore(&s.data[${exprIndex}], ${exprZeroElement});`;
+    atomicStore(&s.data[index], ${exprZeroElement});`;
               } else {
-                testFunctionSource += `
-                  s.data[${exprIndex}] = ${exprZeroElement};`;
+                suffices.forEach(x => {
+                  testFunctionSource += `
+    s.data[index]${x} = ${exprZeroElement};`;
+                });
               }
               break;
           }
+          testFunctionSource += `
+  }`;
         }
-        testFunctionSource += '\n';
       }
     }
 
     // Check that the canaries haven't been modified
     if (usesCanary) {
       testFunctionSource += `
-        for (var i = 0u; i < 10u; i = i + 1u) {
-          if (s.startCanary[i] != 0xFFFFFFFFu) {
-            return ${nextErrorReturnValue()};
-          }
-          if (s.endCanary[i] != 0xFFFFFFFFu) {
-            return ${nextErrorReturnValue()};
-          }
-        }`;
+  for (var i = 0u; i < 10u; i = i + 1u) {
+    if (s.startCanary[i] != 0xFFFFFFFFu) {
+      return ${nextErrorReturnValue()};
+    }
+    if (s.endCanary[i] != 0xFFFFFFFFu) {
+      return ${nextErrorReturnValue()};
+    }
+  }`;
+    }
+
+    // Shadowing case declarations
+    let moduleScopeShadowDecls = '';
+    let functionScopeShadowDecls = '';
+
+    switch (shadowingMode) {
+      case 'module-scope':
+        // Shadow the builtins likely used by robustness as module-scope variables
+        moduleScopeShadowDecls = `
+var<private> min = 0;
+var<private> max = 0;
+var<private> arrayLength = 0;
+`;
+        // Make sure that these are referenced by the function.
+        // This ensures that compilers don't strip away unused variables.
+        functionScopeShadowDecls = `
+  _ = min;
+  _ = max;
+  _ = arrayLength;
+`;
+        break;
+      case 'function-scope':
+        // Shadow the builtins likely used by robustness as function-scope variables
+        functionScopeShadowDecls = `
+  let min = 0;
+  let max = 0;
+  let arrayLength = 0;
+`;
+        break;
     }
 
     // Run the test
 
     // First aggregate the test source
     const testSource = `
-      ${globalSource}
+${globalSource}
+${moduleScopeShadowDecls}
 
-      fn runTest() -> u32 {
-        ${testFunctionSource}
-        return 0u;
-      }`;
+fn runTest() -> u32 {
+  ${functionScopeShadowDecls}
+  ${testFunctionSource}
+  return 0u;
+}`;
+
+    const layout = t.device.createPipelineLayout({
+      bindGroupLayouts: [
+        t.device.createBindGroupLayout({
+          entries: testGroupBGLEntires,
+        }),
+        t.device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: {
+                type: 'uniform',
+              },
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: {
+                type: 'storage',
+              },
+            },
+          ],
+        }),
+      ],
+    });
+
+    const enables = t.params.baseType === 'f16' ? 'enable f16;' : '';
 
     // Run it.
     if (bufferBindingSize !== undefined && baseType !== 'bool') {
@@ -328,12 +460,24 @@ g.test('linear_memory')
       );
 
       // Run the shader, accessing the buffer.
-      runShaderTest(t, GPUShaderStage.COMPUTE, testSource, [
-        {
-          binding: 0,
-          resource: { buffer: testBuffer, offset: bufferBindingOffset, size: bufferBindingSize },
-        },
-      ]);
+      await runShaderTest(
+        t,
+        enables,
+        GPUShaderStage.COMPUTE,
+        testSource,
+        layout,
+        [
+          {
+            binding: 0,
+            resource: {
+              buffer: testBuffer,
+              offset: dynamicOffset ? 0 : bufferBindingOffset,
+              size: bufferBindingSize,
+            },
+          },
+        ],
+        dynamicOffset ? [bufferBindingOffset] : undefined
+      );
 
       // Check that content of the buffer outside of the allowed area didn't change.
       const expectedBytes = new Uint8Array(expectedData);
@@ -344,6 +488,6 @@ g.test('linear_memory')
         bufferBindingEnd
       );
     } else {
-      runShaderTest(t, GPUShaderStage.COMPUTE, testSource, []);
+      await runShaderTest(t, enables, GPUShaderStage.COMPUTE, testSource, layout, []);
     }
   });

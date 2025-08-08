@@ -1,13 +1,12 @@
 /**
 * AUTO-GENERATED - DO NOT EDIT. Source: https://github.com/gpuweb/cts
-**/import { version } from '../version.js';
+**/import { globalTestConfig } from '../../framework/test_config.js';import { version } from '../version.js';
+
 import { TestCaseRecorder } from './test_case_recorder.js';
 
 
 
 export class Logger {
-  static globalDebugMode = false;
-
 
   results = new Map();
 
@@ -19,12 +18,13 @@ export class Logger {
     const result = { status: 'running', timems: -1 };
     this.results.set(name, result);
     return [
-    new TestCaseRecorder(result, this.overriddenDebugMode ?? Logger.globalDebugMode),
+    new TestCaseRecorder(result, this.overriddenDebugMode ?? globalTestConfig.enableDebugLogs),
     result];
 
   }
 
   asJSON(space) {
     return JSON.stringify({ version, results: Array.from(this.results) }, undefined, space);
-  }}
+  }
+}
 //# sourceMappingURL=logger.js.map

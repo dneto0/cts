@@ -1,4 +1,4 @@
-// AUTO-GENERATED - DO NOT EDIT. See src/common/tools/gen_listings.ts.
+// AUTO-GENERATED - DO NOT EDIT. See src/common/tools/gen_listings_and_webworkers.ts.
 
 export const listing = [
   {
@@ -27,6 +27,16 @@ export const listing = [
   },
   {
     "file": [
+      "crc32"
+    ]
+  },
+  {
+    "file": [
+      "floating_point"
+    ]
+  },
+  {
+    "file": [
       "getStackTrace"
     ]
   },
@@ -42,6 +52,11 @@ export const listing = [
   },
   {
     "file": [
+      "maths"
+    ]
+  },
+  {
+    "file": [
       "params_builder_and_utils"
     ]
   },
@@ -52,7 +67,17 @@ export const listing = [
   },
   {
     "file": [
+      "parse_imports"
+    ]
+  },
+  {
+    "file": [
       "preprocessor"
+    ]
+  },
+  {
+    "file": [
+      "prng"
     ]
   },
   {
@@ -67,12 +92,22 @@ export const listing = [
   },
   {
     "file": [
+      "serialization"
+    ]
+  },
+  {
+    "file": [
       "test_group"
     ]
   },
   {
     "file": [
       "test_query"
+    ]
+  },
+  {
+    "file": [
+      "texture_ok"
     ]
   }
 ];

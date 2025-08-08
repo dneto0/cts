@@ -43,16 +43,18 @@ const specsData: { [k: string]: SpecFile } = {
       const g = makeTestGroupForUnitTesting(UnitTest);
       g.test('hello').fn(() => {});
       g.test('bonjour').fn(() => {});
-      g.test('hola').fn(() => {});
+      g.test('hola')
+        .desc('TODO TODO')
+        .fn(() => {});
       return g;
     })(),
   },
   'suite1/bar/biz.spec.js': {
-    description: 'desc 1f',
+    description: 'desc 1f TODO TODO',
     g: makeTestGroupForUnitTesting(UnitTest), // file with no tests
   },
   'suite1/bar/buzz/buzz.spec.js': {
-    description: 'desc 1d',
+    description: 'desc 1d TODO',
     g: (() => {
       const g = makeTestGroupForUnitTesting(UnitTest);
       g.test('zap').fn(() => {});
@@ -71,6 +73,11 @@ const specsData: { [k: string]: SpecFile } = {
           { a: 1, b: 2, _c: 0 },
           { b: 3, a: 1, _c: 0 },
         ])
+        .fn(() => {});
+      g.test('batched')
+        // creates two cases: one for subcases 1,2 and one for subcase 3
+        .paramsSubcasesOnly(u => u.combine('x', [1, 2, 3]))
+        .batch(2)
         .fn(() => {});
       return g;
     })(),
@@ -97,21 +104,32 @@ const specsData: { [k: string]: SpecFile } = {
 };
 
 class FakeTestFileLoader extends TestFileLoader {
-  async listing(suite: string): Promise<TestSuiteListing> {
-    return listingData[suite];
+  listing(suite: string): Promise<TestSuiteListing> {
+    return Promise.resolve(listingData[suite]);
   }
 
-  async import(path: string): Promise<SpecFile> {
+  import(path: string): Promise<SpecFile> {
     assert(path in specsData, '[test] mock file ' + path + ' does not exist');
-    return specsData[path];
+    return Promise.resolve(specsData[path]);
   }
 }
 
 class LoadingTest extends UnitTest {
-  static readonly loader = new FakeTestFileLoader();
+  loader: FakeTestFileLoader = new FakeTestFileLoader();
+  events: (string | null)[] = [];
+  private isListenersAdded = false;
+
+  collectEvents(): void {
+    this.events = [];
+    if (!this.isListenersAdded) {
+      this.isListenersAdded = true;
+      this.loader.addEventListener('import', ev => this.events.push(ev.data.url));
+      this.loader.addEventListener('finish', _ev => this.events.push(null));
+    }
+  }
 
   async load(query: string): Promise<TestTreeLeaf[]> {
-    return Array.from(await LoadingTest.loader.loadCases(parseQuery(query)));
+    return Array.from(await this.loader.loadCases(parseQuery(query)));
   }
 
   async loadNames(query: string): Promise<string[]> {
@@ -121,22 +139,45 @@ class LoadingTest extends UnitTest {
 
 export const g = makeTestGroup(LoadingTest);
 
-g.test('suite').fn(async t => {
+g.test('suite').fn(t => {
   t.shouldReject('Error', t.load('suite1'));
   t.shouldReject('Error', t.load('suite1:'));
 });
 
 g.test('group').fn(async t => {
-  t.expect((await t.load('suite1:*')).length === 8);
+  t.collectEvents();
+  t.expect((await t.load('suite1:*')).length === 10);
+  t.expect(
+    objectEquals(t.events, [
+      'suite1/foo.spec.js',
+      'suite1/bar/biz.spec.js',
+      'suite1/bar/buzz/buzz.spec.js',
+      'suite1/baz.spec.js',
+      null,
+    ])
+  );
+
+  t.collectEvents();
   t.expect((await t.load('suite1:foo,*')).length === 3); // x:foo,* matches x:foo:
+  t.expect(objectEquals(t.events, ['suite1/foo.spec.js', null]));
+
+  t.collectEvents();
   t.expect((await t.load('suite1:bar,*')).length === 1);
+  t.expect(
+    objectEquals(t.events, ['suite1/bar/biz.spec.js', 'suite1/bar/buzz/buzz.spec.js', null])
+  );
+
+  t.collectEvents();
   t.expect((await t.load('suite1:bar,buzz,buzz,*')).length === 1);
+  t.expect(objectEquals(t.events, ['suite1/bar/buzz/buzz.spec.js', null]));
 
   t.shouldReject('Error', t.load('suite1:f*'));
 
   {
     const s = new TestQueryMultiFile('suite1', ['bar', 'buzz']).toString();
+    t.collectEvents();
     t.expect((await t.load(s)).length === 1);
+    t.expect(objectEquals(t.events, ['suite1/bar/buzz/buzz.spec.js', null]));
   }
 });
 
@@ -151,7 +192,7 @@ g.test('test').fn(async t => {
 
   t.expect((await t.load('suite1:foo:*')).length === 3);
   t.expect((await t.load('suite1:bar,buzz,buzz:*')).length === 1);
-  t.expect((await t.load('suite1:baz:*')).length === 4);
+  t.expect((await t.load('suite1:baz:*')).length === 6);
 
   t.expect((await t.load('suite2:foof:bluh,*')).length === 1);
   t.expect((await t.load('suite2:foof:bluh,a,*')).length === 1);
@@ -173,6 +214,7 @@ g.test('case').fn(async t => {
   t.shouldReject('Error', t.load('suite1:baz:zed,:*'));
 
   t.shouldReject('Error', t.load('suite1:baz:zed:'));
+  t.shouldReject('Error', t.load('suite1:baz:zed:a=1'));
   t.shouldReject('Error', t.load('suite1:baz:zed:a=1;b=2*'));
   t.shouldReject('Error', t.load('suite1:baz:zed:a=1;b=2;'));
   t.shouldReject('SyntaxError', t.load('suite1:baz:zed:a=1;b=2,')); // tries to parse '2,' as JSON
@@ -200,6 +242,13 @@ g.test('case').fn(async t => {
     const s = new TestQuerySingleCase('suite1', ['baz'], ['zed'], { a: 1, b: 2 }).toString();
     t.expect((await t.load(s)).length === 1);
   }
+});
+
+g.test('batching').fn(async t => {
+  t.expect((await t.load('suite1:baz:batched,*')).length === 2);
+  t.expect((await t.load('suite1:baz:batched:*')).length === 2);
+  t.expect((await t.load('suite1:baz:batched:batch__=1;*')).length === 1);
+  t.expect((await t.load('suite1:baz:batched:batch__=1')).length === 1);
 });
 
 async function runTestcase(
@@ -646,49 +695,67 @@ async function testIterateCollapsed(
   t: LoadingTest,
   alwaysExpandThroughLevel: ExpandThroughLevel,
   expectations: string[],
-  expectedResult: 'throws' | string[],
+  expectedResult: 'throws' | string[] | [string, number | undefined][],
   includeEmptySubtrees = false
 ) {
   t.debug(`expandThrough=${alwaysExpandThroughLevel} expectations=${expectations}`);
-  const treePromise = LoadingTest.loader.loadTree(
-    new TestQueryMultiFile('suite1', []),
-    expectations
-  );
+  const treePromise = t.loader.loadTree(new TestQueryMultiFile('suite1', []), {
+    subqueriesToExpand: expectations,
+  });
   if (expectedResult === 'throws') {
-    t.shouldReject('Error', treePromise, 'loadTree should have thrown Error');
+    t.shouldReject('Error', treePromise, {
+      // Some errors here use StacklessError to print nicer command line outputs.
+      allowMissingStack: true,
+    });
     return;
   }
   const tree = await treePromise;
-  const actualIter = tree.iterateCollapsedQueries(includeEmptySubtrees, alwaysExpandThroughLevel);
-  const actual = Array.from(actualIter, q => q.toString());
+  const actualIter = tree.iterateCollapsedNodes({
+    includeEmptySubtrees,
+    alwaysExpandThroughLevel,
+  });
+  const testingTODOs = expectedResult.length > 0 && expectedResult[0] instanceof Array;
+  const actual = Array.from(actualIter, ({ query, subtreeCounts }) =>
+    testingTODOs ? [query.toString(), subtreeCounts?.nodesWithTODO] : query.toString()
+  );
   if (!objectEquals(actual, expectedResult)) {
     t.fail(
       `iterateCollapsed failed:
-  got [${actual.join(', ')}]
-  exp [${expectedResult.join(', ')}]
+  got ${JSON.stringify(actual)}
+  exp ${JSON.stringify(expectedResult)}
 ${tree.toString()}`
     );
   }
 }
 
-g.test('print').fn(async () => {
-  const tree = await LoadingTest.loader.loadTree(new TestQueryMultiFile('suite1', []));
+g.test('print').fn(async t => {
+  const tree = await t.loader.loadTree(new TestQueryMultiFile('suite1', []));
   tree.toString();
 });
 
 g.test('iterateCollapsed').fn(async t => {
-  await testIterateCollapsed(t, 1, [], ['suite1:foo:*', 'suite1:bar,buzz,buzz:*', 'suite1:baz:*']);
+  await testIterateCollapsed(
+    t,
+    1,
+    [],
+    [
+      ['suite1:foo:*', 1], // to-do propagated up from foo:hola
+      ['suite1:bar,buzz,buzz:*', 1], // to-do in file description
+      ['suite1:baz:*', 0],
+    ]
+  );
   await testIterateCollapsed(
     t,
     2,
     [],
     [
-      'suite1:foo:hello:*',
-      'suite1:foo:bonjour:*',
-      'suite1:foo:hola:*',
-      'suite1:bar,buzz,buzz:zap:*',
-      'suite1:baz:wye:*',
-      'suite1:baz:zed:*',
+      ['suite1:foo:hello:*', 0],
+      ['suite1:foo:bonjour:*', 0],
+      ['suite1:foo:hola:*', 1], // to-do in test description
+      ['suite1:bar,buzz,buzz:zap:*', 0],
+      ['suite1:baz:wye:*', 0],
+      ['suite1:baz:zed:*', 0],
+      ['suite1:baz:batched:*', 0],
     ]
   );
   await testIterateCollapsed(
@@ -696,14 +763,16 @@ g.test('iterateCollapsed').fn(async t => {
     3,
     [],
     [
-      'suite1:foo:hello:',
-      'suite1:foo:bonjour:',
-      'suite1:foo:hola:',
-      'suite1:bar,buzz,buzz:zap:',
-      'suite1:baz:wye:',
-      'suite1:baz:wye:x=1',
-      'suite1:baz:zed:a=1;b=2',
-      'suite1:baz:zed:b=3;a=1',
+      ['suite1:foo:hello:', undefined],
+      ['suite1:foo:bonjour:', undefined],
+      ['suite1:foo:hola:', undefined],
+      ['suite1:bar,buzz,buzz:zap:', undefined],
+      ['suite1:baz:wye:', undefined],
+      ['suite1:baz:wye:x=1', undefined],
+      ['suite1:baz:zed:a=1;b=2', undefined],
+      ['suite1:baz:zed:b=3;a=1', undefined],
+      ['suite1:baz:batched:batch__=0', undefined],
+      ['suite1:baz:batched:batch__=1', undefined],
     ]
   );
 
@@ -731,6 +800,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:bar,buzz,buzz:zap:*',
       'suite1:baz:wye:*',
       'suite1:baz:zed:*',
+      'suite1:baz:batched:*',
     ]
   );
   // Test with includeEmptySubtrees=true
@@ -759,6 +829,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:bar,buzz,buzz:zap:*',
       'suite1:baz:wye:*',
       'suite1:baz:zed:*',
+      'suite1:baz:batched:*',
       'suite1:empty,*',
     ],
     true
@@ -769,19 +840,37 @@ g.test('iterateCollapsed').fn(async t => {
     t,
     1,
     ['suite1:baz:wye:*'],
-    ['suite1:foo:*', 'suite1:bar,buzz,buzz:*', 'suite1:baz:wye:*', 'suite1:baz:zed,*']
+    [
+      'suite1:foo:*',
+      'suite1:bar,buzz,buzz:*',
+      'suite1:baz:wye:*',
+      'suite1:baz:zed,*',
+      'suite1:baz:batched,*',
+    ]
   );
   await testIterateCollapsed(
     t,
     1,
     ['suite1:baz:zed:*'],
-    ['suite1:foo:*', 'suite1:bar,buzz,buzz:*', 'suite1:baz:wye,*', 'suite1:baz:zed:*']
+    [
+      'suite1:foo:*',
+      'suite1:bar,buzz,buzz:*',
+      'suite1:baz:wye,*',
+      'suite1:baz:zed:*',
+      'suite1:baz:batched,*',
+    ]
   );
   await testIterateCollapsed(
     t,
     1,
     ['suite1:baz:wye:*', 'suite1:baz:zed:*'],
-    ['suite1:foo:*', 'suite1:bar,buzz,buzz:*', 'suite1:baz:wye:*', 'suite1:baz:zed:*']
+    [
+      'suite1:foo:*',
+      'suite1:bar,buzz,buzz:*',
+      'suite1:baz:wye:*',
+      'suite1:baz:zed:*',
+      'suite1:baz:batched,*',
+    ]
   );
   await testIterateCollapsed(
     t,
@@ -793,6 +882,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:baz:wye:',
       'suite1:baz:wye:x=1;*',
       'suite1:baz:zed,*',
+      'suite1:baz:batched,*',
     ]
   );
   await testIterateCollapsed(
@@ -805,6 +895,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:baz:wye:',
       'suite1:baz:wye:x=1',
       'suite1:baz:zed,*',
+      'suite1:baz:batched,*',
     ]
   );
   await testIterateCollapsed(
@@ -817,6 +908,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:baz:wye:',
       'suite1:baz:wye:x=1;*',
       'suite1:baz:zed,*',
+      'suite1:baz:batched,*',
     ]
   );
   await testIterateCollapsed(
@@ -831,6 +923,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:baz:wye:',
       'suite1:baz:wye:x=1;*',
       'suite1:baz:zed:*',
+      'suite1:baz:batched:*',
     ]
   );
   await testIterateCollapsed(
@@ -845,6 +938,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:baz:wye:',
       'suite1:baz:wye:x=1',
       'suite1:baz:zed:*',
+      'suite1:baz:batched:*',
     ]
   );
   await testIterateCollapsed(
@@ -859,6 +953,7 @@ g.test('iterateCollapsed').fn(async t => {
       'suite1:baz:wye:',
       'suite1:baz:wye:x=1;*',
       'suite1:baz:zed:*',
+      'suite1:baz:batched:*',
     ]
   );
 
